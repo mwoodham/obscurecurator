@@ -1,5 +1,5 @@
 # Virtual Environment
-venv/
+venv*/
 env/
 ENV/
 .env/
@@ -50,3 +50,9 @@ media/
 *.swp
 *.swo
 .DS_Store
+
+# Test scripts
+*test*.py
+debug_*.py
+check_*.py
+simple_*.py
