@@ -4,7 +4,7 @@ import queue
 from typing import List, Dict, Any, Optional
 
 from database.schema import VideoSegment
-from .segment_selector import SegmentSelector
+from media_processor.segment_selector import SegmentSelector
 from .playback_engine import PlaybackEngine
 from .transition_manager import TransitionManager
 

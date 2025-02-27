@@ -56,3 +56,4 @@ media/
 debug_*.py
 check_*.py
 simple_*.py
+tests/

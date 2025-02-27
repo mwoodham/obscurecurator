@@ -10,20 +10,22 @@ import os
 from pathlib import Path
 import config
 from ui.playback_control_ui import PlaybackControlUI
+from ui.processing_ui import ProcessingStatusUI  # Import our new processing UI
 from media_processor.segment_selector import SegmentSelector
 
 class MainWindow(QMainWindow):
     """Main application window with tabs for different functionality."""
     
-    def __init__(self, processor, playback_engine, playback_controller, segment_selector):
+    def __init__(self, processor, playback_engine, playback_controller, segment_selector, db_manager):
         super().__init__()
         self.processor = processor
         self.playback_engine = playback_engine
         self.playback_controller = playback_controller
         self.segment_selector = segment_selector
+        self.db_manager = db_manager  # Added db_manager
         
         self.setWindowTitle("AI Media Collage")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1000, 800)  # Slightly taller to accommodate processing UI
         
         # Setup UI
         self._setup_menu()
@@ -55,6 +57,24 @@ class MainWindow(QMainWindow):
         process_all_action = QAction('Process All Media', self)
         process_all_action.triggered.connect(self._process_all_media)
         process_menu.addAction(process_all_action)
+        
+        # Stop processing action
+        stop_processing_action = QAction('Stop Processing', self)
+        stop_processing_action.triggered.connect(self._stop_processing)
+        process_menu.addAction(stop_processing_action)
+        
+        # Retry failed action - NEW
+        retry_failed_action = QAction('Retry Failed Files', self)
+        retry_failed_action.triggered.connect(self._retry_failed)
+        process_menu.addAction(retry_failed_action)
+        
+        # Database menu - NEW
+        db_menu = menubar.addMenu('Database')
+        
+        # Backup database action
+        backup_action = QAction('Backup Database', self)
+        backup_action.triggered.connect(self._backup_database)
+        db_menu.addAction(backup_action)
         
         # Playback menu
         playback_menu = menubar.addMenu('Playback')
@@ -109,52 +129,9 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(dir_group)
         
-        # Processing controls
-        processing_group = QGroupBox("Processing Controls")
-        processing_layout = QVBoxLayout(processing_group)
-        
-        # Processing buttons
-        process_button = QPushButton("Process All Media Files")
-        process_button.clicked.connect(self._process_all_media)
-        processing_layout.addWidget(process_button)
-        
-        # Progress bar
-        self.process_progress = QProgressBar()
-        self.process_progress.setRange(0, 100)
-        self.process_progress.setValue(0)
-        processing_layout.addWidget(self.process_progress)
-        
-        # Status
-        self.process_status = QLabel("Ready to process media")
-        processing_layout.addWidget(self.process_status)
-        
-        layout.addWidget(processing_group)
-        
-        # Processing options
-        options_group = QGroupBox("Processing Options")
-        options_layout = QVBoxLayout(options_group)
-        
-        # Segment extraction options
-        extract_layout = QHBoxLayout()
-        extract_layout.addWidget(QLabel("Extraction Method:"))
-        
-        self.extract_method = QComboBox()
-        self.extract_method.addItems(["Scene Detection", "Fixed Duration", "Both"])
-        extract_layout.addWidget(self.extract_method)
-        
-        options_layout.addLayout(extract_layout)
-        
-        # Feature extraction options
-        feature_layout = QHBoxLayout()
-        feature_layout.addWidget(QLabel("Feature Extraction:"))
-        
-        self.feature_method = QComboBox()
-        self.feature_method.addItems(["CLIP", "Color Histogram", "Both"])
-        feature_layout.addWidget(self.feature_method)
-        
-        options_layout.addLayout(feature_layout)
-        
-        layout.addWidget(options_group)
+        # Use our new improved ProcessingStatusUI
+        self.processing_ui = ProcessingStatusUI(self.processor, self.db_manager)
+        layout.addWidget(self.processing_ui)
         
         # Add spacer
         layout.addStretch()
@@ -183,19 +160,32 @@ class MainWindow(QMainWindow):
     
     def _process_all_media(self):
         """Process all media files."""
-        # Update UI
-        self.process_status.setText("Processing media files...")
-        self.process_progress.setValue(10)
-        
-        # Process in background
-        # In a real implementation, you would use a worker thread
-        # and update progress periodically
+        # This now uses our enhanced processor manager
         self.processor.process_all()
-        
-        # Update UI
-        self.process_progress.setValue(100)
-        self.process_status.setText("Processing complete")
-        self.status_bar.showMessage("Media processing complete")
+        self.status_bar.showMessage("Media processing started")
+    
+    def _stop_processing(self):
+        """Stop processing media files."""
+        self.processor.stop_processing()
+        self.status_bar.showMessage("Media processing stopped")
+    
+    def _retry_failed(self):
+        """Retry processing failed files."""
+        count = self.processor.resume_failed()
+        self.status_bar.showMessage(f"Queued {count} failed files for reprocessing")
+    
+    def _backup_database(self):
+        """Backup the database."""
+        try:
+            # Import here to avoid circular imports
+            from database.migration import backup_database
+            backup_path = backup_database()
+            if backup_path:
+                self.status_bar.showMessage(f"Database backed up to: {backup_path}")
+            else:
+                self.status_bar.showMessage("No database to backup")
+        except Exception as e:
+            QMessageBox.critical(self, "Backup Error", f"Error backing up database: {str(e)}")
     
     def _start_playback(self):
         """Start playback."""
@@ -209,8 +199,9 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close event."""
-        # Stop playback
+        # Stop playback and processing
         self.playback_controller.stop()
+        self.processor.stop_processing()
         
         # Accept the close event
         event.accept()
