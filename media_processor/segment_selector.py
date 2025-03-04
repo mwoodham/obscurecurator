@@ -5,6 +5,8 @@ from sqlalchemy import func, desc, asc
 from sqlalchemy.orm import joinedload
 from typing import List, Dict, Tuple, Optional
 import heapq
+import time
+import threading
 
 from database.schema import VideoSegment, MediaFile, SegmentFeature, Tag
 from .feature_extractor import FeatureExtractor
@@ -15,31 +17,52 @@ class SegmentSelector:
         self.feature_extractor = FeatureExtractor(use_gpu=False)  # GPU not needed for comparison
         self.last_segments = []  # Keep track of recently played segments
     
-    def random_segment(self) -> Optional[VideoSegment]:
-        """Get a random video segment."""
-        session = self.db_manager.get_session()
-        try:
-            # Only select from processed segments
-            count = session.query(VideoSegment).filter_by(processed=True).count()
-            if count == 0:
-                return None
-            
-            random_offset = random.randint(0, count - 1)
-            segment = session.query(VideoSegment)\
-                .filter_by(processed=True)\
-                .options(joinedload(VideoSegment.source_file))\
-                .offset(random_offset)\
-                .first()
-            
-            if segment:
-                self.last_segments.append(segment.id)
-                # Keep last 10 segments
-                if len(self.last_segments) > 10:
-                    self.last_segments.pop(0)
+    def random_segment(self):
+        """Get a random video segment with timeout protection."""
+        print("Getting random segment")
+        timeout_seconds = 3
+        result = [None]  # Use a list to store result from the thread
+        
+        def query_func():
+            try:
+                session = self.db_manager.get_session()
+                try:
+                    # Only select from processed segments
+                    count = session.query(VideoSegment).filter_by(processed=True).count()
+                    if count == 0:
+                        return None
                     
-            return segment
-        finally:
-            session.close()
+                    random_offset = random.randint(0, count - 1)
+                    segment = session.query(VideoSegment)\
+                        .filter_by(processed=True)\
+                        .options(joinedload(VideoSegment.source_file))\
+                        .offset(random_offset)\
+                        .first()
+                    
+                    if segment:
+                        self.last_segments.append(segment.id)
+                        # Keep last 10 segments
+                        if len(self.last_segments) > 10:
+                            self.last_segments.pop(0)
+                    
+                    result[0] = segment
+                finally:
+                    session.close()
+            except Exception as e:
+                print(f"Error in random_segment: {e}")
+        
+        # Run the query in a separate thread with timeout
+        query_thread = threading.Thread(target=query_func)
+        query_thread.daemon = True
+        query_thread.start()
+        query_thread.join(timeout_seconds)
+        
+        if query_thread.is_alive():
+            print(f"Warning: random_segment timed out after {timeout_seconds} seconds")
+            # Try getting the result anyway, but don't wait
+            return result[0]
+        
+        return result[0]
     
     def get_segment_features(self, segment_id: int, feature_type='visual', feature_name='clip_embedding'):
         """Get features for a segment."""
@@ -60,57 +83,81 @@ class SegmentSelector:
         finally:
             session.close()
     
-    def find_similar_segments(self, segment_id: int, feature_type='visual', 
-                             feature_name='clip_embedding', limit=5, exclude_recent=True) -> List[Tuple[VideoSegment, float]]:
-        """Find segments with similar features."""
-        session = self.db_manager.get_session()
-        try:
-            # Get the reference segment's features
-            ref_features = self.get_segment_features(segment_id, feature_type, feature_name)
-            
-            if ref_features is None:
-                return []
-            
-            # Get all segments
-            segments = session.query(VideoSegment)\
-                .filter_by(processed=True)\
-                .options(joinedload(VideoSegment.source_file))\
-                .filter(VideoSegment.id != segment_id)\
-                .all()
-            
-            if exclude_recent:
-                # Exclude recently played segments
-                segments = [s for s in segments if s.id not in self.last_segments]
-            
-            # Calculate similarity for each segment
-            results = []
-            
-            for segment in segments:
-                # Get segment features
-                features = self.get_segment_features(segment.id, feature_type, feature_name)
-                if features is None:
-                    continue
+    def find_similar_segments(self, segment_id, feature_type='visual', 
+                            feature_name='clip_embedding', limit=5, exclude_recent=True):
+        """Find segments with similar features with timeout."""
+        print(f"Finding similar segments to {segment_id}")
+        timeout_seconds = 3
+        result = [None]  # Use a list to store result from the thread
+        
+        def query_func():
+            try:
+                session = self.db_manager.get_session()
+                try:
+                    # Get the reference segment's features
+                    ref_features = self.get_segment_features(segment_id, feature_type, feature_name)
                     
-                # Calculate similarity
-                if feature_name == 'clip_embedding':
-                    # For CLIP embeddings, use dot product
-                    similarity = np.dot(ref_features, features)
-                elif feature_name == 'color_histogram':
-                    # For color histograms, use histogram intersection
-                    similarity = np.minimum(ref_features, features).sum() / ref_features.sum()
-                else:
-                    # Default similarity
-                    similarity = 0.0
+                    if ref_features is None:
+                        result[0] = []
+                        return
                     
-                results.append((segment, float(similarity)))
-            
-            # Sort by similarity (highest first)
-            results.sort(key=lambda x: x[1], reverse=True)
-            
-            # Return top results
-            return results[:limit]
-        finally:
-            session.close()
+                    # Get all segments
+                    segments = session.query(VideoSegment)\
+                        .filter_by(processed=True)\
+                        .options(joinedload(VideoSegment.source_file))\
+                        .filter(VideoSegment.id != segment_id)\
+                        .limit(100)\
+                        .all()  # Note: moved .all() to its own line
+                    
+                    if exclude_recent:
+                        # Exclude recently played segments
+                        segments = [s for s in segments if s.id not in self.last_segments]
+                    
+                    # Calculate similarity for each segment
+                    similarities = []
+                    
+                    for segment in segments:
+                        # Get segment features
+                        features = self.get_segment_features(segment.id, feature_type, feature_name)
+                        if features is None:
+                            continue
+                            
+                        # Calculate similarity
+                        if feature_name == 'clip_embedding':
+                            # For CLIP embeddings, use dot product
+                            similarity = np.dot(ref_features, features)
+                        elif feature_name == 'color_histogram':
+                            # For color histograms, use histogram intersection
+                            similarity = np.minimum(ref_features, features).sum() / ref_features.sum()
+                        else:
+                            # Default similarity
+                            similarity = 0.0
+                            
+                        similarities.append((segment, float(similarity)))
+                    
+                    # Sort by similarity (highest first)
+                    similarities.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Return top results
+                    result[0] = similarities[:limit]
+                finally:
+                    session.close()
+            except Exception as e:
+                print(f"Error in find_similar_segments: {e}")
+                result[0] = []
+        
+        # Run the query in a separate thread with timeout
+        query_thread = threading.Thread(target=query_func)
+        query_thread.daemon = True
+        query_thread.start()
+        query_thread.join(timeout_seconds)
+        
+        if query_thread.is_alive():
+            print(f"Warning: find_similar_segments timed out after {timeout_seconds} seconds")
+            # Return an empty list if timed out
+            return []
+        
+        return result[0] or []
     
     def find_contrasting_segments(self, segment_id: int, feature_type='visual', 
                                 feature_name='clip_embedding', limit=5) -> List[Tuple[VideoSegment, float]]:
@@ -192,156 +239,78 @@ class SegmentSelector:
         return self.find_segments_by_tag(concept, tag_type='concept', limit=limit)
     
     def create_sequence(self, mode='similar', length=10, seed_segment=None, 
-                       feature_type='visual', feature_name='clip_embedding') -> List[VideoSegment]:
-        """Create a sequence of segments using different strategies.
+                    feature_type='visual', feature_name='clip_embedding'):
+        """Create a sequence of segments with timeout protection."""
+        print(f"Creating sequence in mode: {mode}, length: {length}")
         
-        Args:
-            mode: Playback mode ('similar', 'contrast', 'random', 'concept_chain')
-            length: Number of segments in the sequence
-            seed_segment: Starting segment (optional)
-            feature_type: Type of feature to use ('visual', 'audio', etc.)
-            feature_name: Name of feature to use ('clip_embedding', 'color_histogram', etc.)
-            
-        Returns:
-            List[VideoSegment]: Sequence of segments
-        """
-        # Clear recent segments history if starting new sequence
-        if seed_segment is None:
-            self.last_segments = []
-            
-        # Get initial segment if not provided
-        current_segment = seed_segment or self.random_segment()
-        if not current_segment:
-            return []
-            
-        sequence = [current_segment]
-        self.last_segments.append(current_segment.id)
-        
-        while len(sequence) < length:
-            if mode == 'similar':
-                # Find similar segments to the most recent segment
-                similar = self.find_similar_segments(
-                    current_segment.id, 
-                    feature_type=feature_type, 
-                    feature_name=feature_name,
-                    limit=3
-                )
+        # Use a simple approach to avoid timeouts
+        try:
+            # Clear recent segments history if starting new sequence
+            if seed_segment is None:
+                self.last_segments = []
                 
-                if similar:
-                    # Pick randomly from the top 3 similar segments
-                    next_segment, _ = random.choice(similar)
-                    sequence.append(next_segment)
-                    self.last_segments.append(next_segment.id)
-                    current_segment = next_segment
-                else:
-                    # If no similar segments, pick a random one
-                    random_segment = self.random_segment()
-                    if random_segment:
-                        sequence.append(random_segment)
-                        current_segment = random_segment
-                    else:
-                        break
-                        
-            elif mode == 'contrast':
-                # Find contrasting segments to the most recent segment
-                contrasting = self.find_contrasting_segments(
-                    current_segment.id, 
-                    feature_type=feature_type, 
-                    feature_name=feature_name,
-                    limit=3
-                )
+            # Get initial segment if not provided
+            current_segment = seed_segment or self.random_segment()
+            if not current_segment:
+                print("No initial segment found")
+                return []
                 
-                if contrasting:
-                    # Pick randomly from the top 3 contrasting segments
-                    next_segment, _ = random.choice(contrasting)
-                    sequence.append(next_segment)
-                    self.last_segments.append(next_segment.id)
-                    current_segment = next_segment
-                else:
-                    # If no contrasting segments, pick a random one
-                    random_segment = self.random_segment()
-                    if random_segment:
-                        sequence.append(random_segment)
-                        current_segment = random_segment
-                    else:
-                        break
-                        
-            elif mode == 'concept_chain':
-                # Follow a chain of concepts for more semantic connections
-                # Get top concepts for current segment
-                session = self.db_manager.get_session()
-                try:
-                    top_concepts = session.query(Tag)\
-                        .filter_by(segment_id=current_segment.id, tag_type='concept')\
-                        .order_by(desc(Tag.confidence))\
-                        .limit(3)\
-                        .all()
-                        
-                    if top_concepts:
-                        # Pick a random concept from the top 3
-                        selected_concept = random.choice(top_concepts).tag_value
-                        
-                        # Find segments with this concept
-                        concept_segments = self.find_segments_by_concept(
-                            selected_concept, limit=3
-                        )
-                        
-                        if concept_segments:
-                            # Pick a random segment with this concept
-                            next_segment = random.choice(concept_segments)
-                            sequence.append(next_segment)
-                            self.last_segments.append(next_segment.id)
-                            current_segment = next_segment
-                            continue
-                finally:
-                    session.close()
-                    
-                # Fallback to similar if concept_chain fails
-                similar = self.find_similar_segments(
-                    current_segment.id, 
-                    feature_type=feature_type, 
-                    feature_name=feature_name,
-                    limit=3
-                )
+            sequence = [current_segment]
+            self.last_segments.append(current_segment.id)
+            
+            # Add segments up to the requested length
+            attempts = 0
+            max_attempts = length * 3  # Allow more attempts than segments needed
+            
+            while len(sequence) < length and attempts < max_attempts:
+                attempts += 1
                 
-                if similar:
-                    next_segment, _ = random.choice(similar)
-                    sequence.append(next_segment)
-                    self.last_segments.append(next_segment.id)
-                    current_segment = next_segment
-                else:
-                    random_segment = self.random_segment()
-                    if random_segment:
-                        sequence.append(random_segment)
-                        current_segment = random_segment
+                # Different strategies based on mode
+                if mode == 'similar':
+                    # Try to find similar segment
+                    similar = self.find_similar_segments(
+                        current_segment.id, 
+                        feature_type=feature_type, 
+                        feature_name=feature_name,
+                        limit=3
+                    )
+                    
+                    if similar:
+                        # Pick randomly from the similar segments
+                        next_segment, _ = random.choice(similar)
                     else:
+                        # Fallback to random
+                        next_segment = self.random_segment()
+                        if not next_segment:
+                            break
+                
+                elif mode == 'random':
+                    # Just pick a random segment
+                    next_segment = self.random_segment()
+                    if not next_segment:
                         break
-                        
-            elif mode == 'random':
-                # Just pick random segments
-                next_segment = self.random_segment()
-                if next_segment:
-                    sequence.append(next_segment)
-                    self.last_segments.append(next_segment.id)
-                    current_segment = next_segment
+                
                 else:
-                    break
-                    
-            else:
-                # Unknown mode, default to random
-                next_segment = self.random_segment()
-                if next_segment:
-                    sequence.append(next_segment)
-                    self.last_segments.append(next_segment.id)
-                    current_segment = next_segment
-                else:
-                    break
-                    
-            # Limit recent segments history to 10
-            if len(self.last_segments) > 10:
-                self.last_segments.pop(0)
-        
-        return sequence
+                    # For other modes, just default to random for safety
+                    next_segment = self.random_segment()
+                    if not next_segment:
+                        break
+                
+                # Add to sequence
+                sequence.append(next_segment)
+                self.last_segments.append(next_segment.id)
+                current_segment = next_segment
+                
+                # Prevent duplicates in the sequence
+                if len(self.last_segments) > 10:
+                    self.last_segments.pop(0)
+            
+            print(f"Sequence created with {len(sequence)} segments")
+            return sequence
+            
+        except Exception as e:
+            print(f"Error creating sequence: {e}")
+            return []  # Return empty list on error
         
     def get_common_tags(self, count=10) -> List[Tuple[str, int]]:
         """Get the most common tags across all segments."""

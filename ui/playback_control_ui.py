@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QLabel, QComboBox, QGroupBox, QScrollArea, QGridLayout,
     QSlider, QCheckBox, QListWidget, QListWidgetItem
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QObject
 from PySide6.QtGui import QFont
 
 from database.schema import VideoSegment, Tag

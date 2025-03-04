@@ -142,7 +142,7 @@ def show_status(args, db_manager):
         # Display summary
         print("\n=== Processing Status Summary ===")
         print(f"Total Files: {total_files}")
-        print(f"Completed: {completed} ({completed/total_files*100:.1f}% if total_files > 0 else 0}%)")
+        print(f"Completed: {completed} ({(completed/total_files*100) if total_files > 0 else 0:.1f}%)")
         print(f"Failed: {failed}")
         print(f"Pending: {pending}")
         print(f"In Progress: {in_progress}")

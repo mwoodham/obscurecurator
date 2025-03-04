@@ -4,6 +4,7 @@ import os
 import logging
 from pathlib import Path  
 from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QObject
 
 import config
 from media_processor.processor_manager import ProcessorManager
